@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8-Entry Tournament Bracket</title>
+<style>
+  :root {
+    --bg: #14161c;
+    --card: #1f232d;
+    --card-hover: #2a3040;
+    --border: #353b4b;
+    --text: #e8eaf0;
+    --muted: #9aa1b2;
+    --accent: #f5b942;
+    --win: #3ecf8e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  button {
+    background: var(--accent);
+    color: #1a1a1a;
+    border: 0;
+    border-radius: 6px;
+    padding: 10px 16px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+  button:hover { filter: brightness(1.08); }
+  .hidden { display: none !important; }
+
+  /* ---------- Setup ---------- */
+  .slot {
+    display: grid;
+    grid-template-columns: 28px 1fr 1.4fr auto 56px;
+    gap: 10px;
+    align-items: center;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    margin-bottom: 8px;
+    max-width: 900px;
+  }
+  .slot .num { color: var(--muted); font-weight: 700; text-align: center; }
+  .slot input[type="text"] {
+    width: 100%;
+    padding: 8px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .slot input[type="file"] { color: var(--muted); max-width: 190px; font-size: 12px; }
+  .thumb {
+    width: 48px; height: 48px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .actions { margin-top: 16px; display: flex; gap: 10px; }
+
+  /* ---------- Bracket ---------- */
+  .bracket {
+    display: flex;
+    gap: 36px;
+    overflow-x: auto;
+    padding-bottom: 16px;
+  }
+  .round {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+    min-width: 250px;
+  }
+  .round h3 {
+    text-align: center;
+    margin: 0 0 12px;
+    color: var(--muted);
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .round-body {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+    flex: 1;
+    gap: 16px;
+  }
+  .match {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .team {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 10px;
+    min-height: 62px;
+    cursor: pointer;
+    border-left: 4px solid transparent;
+  }
+  .team + .team { border-top: 1px solid var(--border); }
+  .team:hover { background: var(--card-hover); }
+  .team.empty { cursor: default; color: var(--muted); font-style: italic; }
+  .team.empty:hover { background: transparent; }
+  .team.winner { border-left-color: var(--win); background: rgba(62, 207, 142, 0.12); }
+  .team.loser { opacity: 0.45; }
+  .team img, .team .ph {
+    width: 44px; height: 44px;
+    border-radius: 6px;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .team .name { font-weight: 600; }
+  .team .note { font-size: 12px; color: var(--muted); }
+  .team .seed { color: var(--muted); font-size: 11px; }
+
+  .champion {
+    text-align: center;
+    margin: 0 0 20px;
+    padding: 16px;
+    border: 2px solid var(--accent);
+    border-radius: 10px;
+    background: rgba(245, 185, 66, 0.08);
+    max-width: 420px;
+  }
+  .champion img { width: 96px; height: 96px; border-radius: 10px; object-fit: cover; }
+  .champion .crown { font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); }
+  .champion .cname { font-size: 22px; font-weight: 700; }
+</style>
+</head>
+<body>
+  <h1>Tournament Bracket</h1>
+  <p class="sub" id="sub"></p>
+
+  <!-- SETUP VIEW -->
+  <section id="setup">
+    <div id="slots"></div>
+    <div class="actions">
+      <button id="generate">Generate bracket</button>
+      <button class="secondary" id="fill">Fill with sample names</button>
+    </div>
+  </section>
+
+  <!-- BRACKET VIEW -->
+  <section id="bracketView" class="hidden">
+    <div id="champion"></div>
+    <div class="bracket" id="bracket"></div>
+    <div class="actions">
+      <button class="secondary" id="edit">Edit entries</button>
+      <button class="secondary" id="clearPicks">Clear results</button>
+      <button class="secondary" id="reset">Reset everything</button>
+    </div>
+  </section>
+
+<script>
+  const SIZE = 8;
+  const ROUND_NAMES = ["Quarterfinals", "Semifinals", "Final"];
+  const STORAGE_KEY = "bracket-poc-v1";
+
+  // ---------- State ----------
+  // entries: 8 items { name, note, photo }
+  // picks[r][m] = index (0-7) of the entry that won match m in round r, or null
+  let state = load() || newState();
+
+  function newState() {
+    return {
+      entries: Array.from({ length: SIZE }, () => ({ name: "", note: "", photo: "" })),
+      picks: [[null, null, null, null], [null, null], [null]],
+      started: false,
+    };
+  }
+
+  function load() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch (e) {
+      alert("Couldn't save (storage full?). Try smaller photos.");
+    }
+  }
+
+  // ---------- Bracket logic ----------
+  // Who is in match m of round r (entry indices or null)?
+  function participants(r, m) {
+    if (r === 0) return [2 * m, 2 * m + 1];
+    return [state.picks[r - 1][2 * m], state.picks[r - 1][2 * m + 1]];
+  }
+
+  // Clear any pick that no longer matches its participants (cascades forward).
+  function sanitize() {
+    for (let r = 1; r < state.picks.length; r++) {
+      for (let m = 0; m < state.picks[r].length; m++) {
+        const p = participants(r, m);
+        if (!p.includes(state.picks[r][m])) state.picks[r][m] = null;
+      }
+    }
+  }
+
+  function pickWinner(r, m, entryIdx) {
+    if (entryIdx === null) return;
+    // clicking the current winner again undoes the pick
+    state.picks[r][m] = state.picks[r][m] === entryIdx ? null : entryIdx;
+    sanitize();
+    save();
+    renderBracket();
+  }
+
+  // ---------- Setup view ----------
+  const slotsEl = document.getElementById("slots");
+
+  function renderSetup() {
+    slotsEl.innerHTML = "";
+    state.entries.forEach((e, i) => {
+      const row = document.createElement("div");
+      row.className = "slot";
+      row.innerHTML = `
+        <div class="num">${i + 1}</div>
+        <input type="text" placeholder="Name" maxlength="40" value="">
+        <input type="text" placeholder="Note (optional)" maxlength="80" value="">
+        <input type="file" accept="image/*">
+        <img class="thumb" alt="">
+      `;
+      const [nameIn, noteIn] = row.querySelectorAll('input[type="text"]');
+      const fileIn = row.querySelector('input[type="file"]');
+      const thumb = row.querySelector(".thumb");
+
+      nameIn.value = e.name;
+      noteIn.value = e.note;
+      if (e.photo) thumb.src = e.photo; else thumb.style.visibility = "hidden";
+
+      nameIn.addEventListener("input", () => { e.name = nameIn.value; save(); });
+      noteIn.addEventListener("input", () => { e.note = noteIn.value; save(); });
+      fileIn.addEventListener("change", async () => {
+        const file = fileIn.files[0];
+        if (!file) return;
+        e.photo = await shrinkImage(file, 240);
+        thumb.src = e.photo;
+        thumb.style.visibility = "visible";
+        save();
+      });
+      slotsEl.appendChild(row);
+    });
+  }
+
+  // Resize to a small square-ish JPEG so localStorage doesn't overflow.
+  function shrinkImage(file, max) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          const scale = Math.min(1, max / Math.max(img.width, img.height));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.round(img.width * scale);
+          canvas.height = Math.round(img.height * scale);
+          canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL("image/jpeg", 0.8));
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // ---------- Bracket view ----------
+  function entryLabel(i) {
+    return state.entries[i].name.trim() || `Entry ${i + 1}`;
+  }
+
+  function teamEl(r, m, idx, otherIdx) {
+    const el = document.createElement("div");
+    if (idx === null || idx === undefined) {
+      el.className = "team empty";
+      el.textContent = "TBD";
+      return el;
+    }
+    const e = state.entries[idx];
+    const picked = state.picks[r][m];
+    el.className = "team" + (picked === idx ? " winner" : picked !== null ? " loser" : "");
+    const photo = e.photo
+      ? `<img src="${e.photo}" alt="">`
+      : `<div class="ph"></div>`;
+    el.innerHTML = `
+      ${photo}
+      <div>
+        <div class="seed">Seed ${idx + 1}</div>
+        <div class="name"></div>
+        <div class="note"></div>
+      </div>`;
+    // textContent (not innerHTML) so typed text can't inject markup
+    el.querySelector(".name").textContent = entryLabel(idx);
+    el.querySelector(".note").textContent = e.note;
+    el.addEventListener("click", () => pickWinner(r, m, idx));
+    return el;
+  }
+
+  function renderBracket() {
+    const bracketEl = document.getElementById("bracket");
+    bracketEl.innerHTML = "";
+
+    ROUND_NAMES.forEach((name, r) => {
+      const round = document.createElement("div");
+      round.className = "round";
+      round.innerHTML = `<h3>${name}</h3><div class="round-body"></div>`;
+      const body = round.querySelector(".round-body");
+
+      state.picks[r].forEach((_, m) => {
+        const [a, b] = participants(r, m);
+        const match = document.createElement("div");
+        match.className = "match";
+        match.appendChild(teamEl(r, m, a, b));
+        match.appendChild(teamEl(r, m, b, a));
+        body.appendChild(match);
+      });
+      bracketEl.appendChild(round);
+    });
+
+    // Champion banner
+    const champEl = document.getElementById("champion");
+    const champ = state.picks[2][0];
+    if (champ !== null) {
+      const e = state.entries[champ];
+      champEl.className = "champion";
+      champEl.innerHTML = `
+        <div class="crown">Champion</div>
+        ${e.photo ? `<img src="${e.photo}" alt=""><br>` : ""}
+        <div class="cname"></div>
+        <div class="note"></div>`;
+      champEl.querySelector(".cname").textContent = entryLabel(champ);
+      champEl.querySelector(".note").textContent = e.note;
+    } else {
+      champEl.className = "";
+      champEl.innerHTML = "";
+    }
+  }
+
+  // ---------- View switching ----------
+  function show(view) {
+    const bracket = view === "bracket";
+    document.getElementById("setup").classList.toggle("hidden", bracket);
+    document.getElementById("bracketView").classList.toggle("hidden", !bracket);
+    document.getElementById("sub").textContent = bracket
+      ? "Click an entry to advance it. Click the winner again to undo."
+      : "Add 8 entries (name, optional note and photo), then generate the bracket.";
+    if (bracket) renderBracket(); else renderSetup();
+  }
+
+  document.getElementById("generate").addEventListener("click", () => {
+    const filled = state.entries.filter(e => e.name.trim()).length;
+    if (filled < SIZE && !confirm(`Only ${filled} of ${SIZE} entries have names. Continue anyway?`)) return;
+    state.started = true;
+    save();
+    show("bracket");
+  });
+
+  document.getElementById("fill").addEventListener("click", () => {
+    const names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"];
+    state.entries.forEach((e, i) => { if (!e.name) e.name = names[i]; });
+    save();
+    renderSetup();
+  });
+
+  document.getElementById("edit").addEventListener("click", () => show("setup"));
+
+  document.getElementById("clearPicks").addEventListener("click", () => {
+    state.picks = [[null, null, null, null], [null, null], [null]];
+    save();
+    renderBracket();
+  });
+
+  document.getElementById("reset").addEventListener("click", () => {
+    if (!confirm("Delete all entries, photos, and results?")) return;
+    state = newState();
+    save();
+    show("setup");
+  });
+
+  // ---------- Init ----------
+  show(state.started ? "bracket" : "setup");
+</script>
+</body>
+</html>
