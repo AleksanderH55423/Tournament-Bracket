@@ -39,7 +39,48 @@
   button:disabled { opacity: 0.4; cursor: not-allowed; }
   .hidden { display: none !important; }
 
+  /* ---------- Tournament log ---------- */
+  button.danger { background: transparent; color: #ff9a9a; border: 1px solid #5c3b3f; }
+  button.danger:hover:not(:disabled) { background: rgba(255, 120, 120, 0.1); filter: none; }
+  .back { margin-bottom: 14px; }
+  #tlist { margin-top: 16px; max-width: 940px; }
+  .tcard {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    cursor: pointer;
+  }
+  .tcard:hover { background: var(--card-hover); }
+  .tinfo { min-width: 0; }
+  .tname { font-weight: 700; font-size: 17px; overflow-wrap: anywhere; }
+  .tchamp { color: var(--accent); font-weight: 600; margin-top: 3px; overflow-wrap: anywhere; }
+  .tmeta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .tbtns { display: flex; gap: 8px; flex-shrink: 0; }
+  .empty-log {
+    color: var(--muted);
+    padding: 28px;
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+  }
+
   /* ---------- Setup ---------- */
+  .namefield { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; max-width: 940px; }
+  .namefield label { color: var(--muted); }
+  .namefield input {
+    flex: 1;
+    padding: 8px 10px;
+    background: var(--card);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 15px;
+  }
   .count { margin: 0 0 12px; color: var(--muted); }
   .count strong { color: var(--text); }
   .slot {
@@ -201,11 +242,22 @@
 </style>
 </head>
 <body>
-  <h1>Tournament Bracket</h1>
+  <button class="secondary back hidden" id="back">&larr; All tournaments</button>
+  <h1 id="title">Tournaments</h1>
   <p class="sub" id="sub"></p>
 
+  <!-- LOG VIEW -->
+  <section id="log">
+    <div class="actions"><button id="newTournament">+ New tournament</button></div>
+    <div id="tlist"></div>
+  </section>
+
   <!-- SETUP VIEW -->
-  <section id="setup">
+  <section id="setup" class="hidden">
+    <div class="namefield">
+      <label for="tname">Tournament name</label>
+      <input type="text" id="tname" maxlength="60" placeholder="Untitled tournament">
+    </div>
     <p class="count" id="count"></p>
     <div id="slots"></div>
     <div class="actions">
@@ -222,7 +274,7 @@
     <div class="actions">
       <button class="secondary" id="edit">Edit entries</button>
       <button class="secondary" id="clearPicks">Clear results</button>
-      <button class="secondary" id="reset">Reset everything</button>
+      <button class="danger" id="deleteCurrent">Delete tournament</button>
     </div>
   </section>
 
@@ -230,38 +282,89 @@
   const MIN_ENTRIES = 2;
   const MAX_ENTRIES = 32;
   const DEFAULT_ENTRIES = 8;
-  const STORAGE_KEY = "bracket-poc-v2";
+  const STORAGE_KEY = "bracket-poc-v3";      // { seq, openId, tournaments: [...] }
+  const OLD_STORAGE_KEY = "bracket-poc-v2";  // the earlier single-bracket version
 
   // ---------- State ----------
-  // entries: array of { name, note, photo } in seed order (entry 1 = top seed)
-  // picks[r][m]: index of the entry the user picked to win match m of round r, or null
-  // builtN: how many entries the current picks were built for (0 = needs rebuilding)
-  let state = load() || newState();
+  // db: everything that gets saved. db.tournaments is the log.
+  // state: the tournament that is currently open (null while on the log screen):
+  //   id, name, nameEdited, created, updated
+  //   entries: array of { name, note, photo } in seed order (entry 1 = top seed)
+  //   picks[r][m]: index of the entry the user picked to win match m of round r, or null
+  //   builtN: how many entries the current picks were built for (0 = needs rebuilding)
+  //   started: whether the bracket has been generated
+  let db = loadDb();
+  let state = null;
 
   function blankEntry() { return { name: "", note: "", photo: "" }; }
 
-  function newState() {
-    return {
+  function newId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+
+  function displayName(t) {
+    return (t.name || "").trim() || "Untitled tournament";
+  }
+
+  function createTournament() {
+    db.seq = (db.seq || 0) + 1;
+    const now = Date.now();
+    const t = {
+      id: newId(),
+      name: `Tournament ${db.seq}`,
+      nameEdited: false,
+      created: now,
+      updated: now,
       entries: Array.from({ length: DEFAULT_ENTRIES }, blankEntry),
       picks: [],
       builtN: 0,
       started: false,
     };
+    db.tournaments.push(t);
+    return t;
   }
 
-  function load() {
+  function validTournament(t) {
+    return t && typeof t.id === "string" && Array.isArray(t.entries) && Array.isArray(t.picks);
+  }
+
+  function loadDb() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      const s = raw ? JSON.parse(raw) : null;
-      return s && Array.isArray(s.entries) && Array.isArray(s.picks) ? s : null;
-    } catch (e) { return null; }
+      const d = raw ? JSON.parse(raw) : null;
+      if (d && Array.isArray(d.tournaments)) {
+        d.tournaments = d.tournaments.filter(validTournament);
+        if (!d.tournaments.some(t => t.id === d.openId)) d.openId = null;
+        d.seq = Math.max(d.seq || 0, d.tournaments.length);
+        return d;
+      }
+      // One-time migration: bring over the single bracket from the earlier version.
+      const old = JSON.parse(localStorage.getItem(OLD_STORAGE_KEY) || "null");
+      if (old && Array.isArray(old.entries) && Array.isArray(old.picks) &&
+          (old.started || old.entries.some(e => e.name || e.note || e.photo))) {
+        const now = Date.now();
+        return {
+          seq: 1,
+          openId: null,
+          tournaments: [{
+            id: newId(), name: "My first tournament", nameEdited: true,
+            created: now, updated: now,
+            entries: old.entries, picks: old.picks,
+            builtN: old.builtN || 0, started: !!old.started,
+          }],
+        };
+      }
+    } catch (e) { /* fall through to an empty log */ }
+    return { seq: 0, openId: null, tournaments: [] };
   }
 
-  function save() {
+  // touch = false for navigation-only saves, so "Updated" only changes when you edit something.
+  function save(touch = true) {
+    if (touch && state) state.updated = Date.now();
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
     } catch (e) {
-      alert("Couldn't save (storage full?). Try smaller photos or fewer entries.");
+      alert("Couldn't save (browser storage is full). Delete an old tournament or use smaller photos.");
     }
   }
 
@@ -366,6 +469,7 @@
   }
 
   function renderSetup() {
+    document.getElementById("tname").value = state.name;
     slotsEl.innerHTML = "";
     const canRemove = state.entries.length > MIN_ENTRIES;
 
@@ -395,7 +499,7 @@
       fileIn.addEventListener("change", async () => {
         const file = fileIn.files[0];
         if (!file) return;
-        e.photo = await shrinkImage(file, 240);
+        e.photo = await shrinkImage(file, 200);
         thumb.src = e.photo;
         thumb.style.visibility = "visible";
         save();
@@ -423,7 +527,7 @@
           canvas.width = Math.round(img.width * scale);
           canvas.height = Math.round(img.height * scale);
           canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-          resolve(canvas.toDataURL("image/jpeg", 0.8));
+          resolve(canvas.toDataURL("image/jpeg", 0.75));
         };
         img.src = reader.result;
       };
@@ -524,7 +628,7 @@
 
   function drawLines() {
     const cols = document.querySelector("#bracket .cols");
-    if (!cols) return;
+    if (!cols || !state) return;
     const svg = cols.querySelector("svg.lines");
     const L = layout();
     const origin = cols.getBoundingClientRect();
@@ -615,14 +719,23 @@
   }
 
   // ---------- View switching ----------
+  // view: "log" (list of tournaments), "setup" (entries) or "bracket"
   function show(view) {
+    const inLog = view === "log";
     const bracket = view === "bracket";
-    document.getElementById("setup").classList.toggle("hidden", bracket);
+    document.getElementById("log").classList.toggle("hidden", !inLog);
+    document.getElementById("setup").classList.toggle("hidden", view !== "setup");
     document.getElementById("bracketView").classList.toggle("hidden", !bracket);
-    document.getElementById("sub").textContent = bracket
-      ? "Click an entry to advance it. Click the winner again to undo."
-      : `Add ${MIN_ENTRIES}-${MAX_ENTRIES} entries (name, optional note and photo). Entry 1 is the top seed; if the count isn't a power of two, the top seeds get byes.`;
-    if (bracket) {
+    document.getElementById("back").classList.toggle("hidden", inLog);
+    document.getElementById("title").textContent = inLog ? "Tournaments" : displayName(state);
+    document.getElementById("sub").textContent = inLog
+      ? "Your saved tournaments. Open one to keep going, or start a new one."
+      : bracket
+        ? "Click an entry to advance it. Click the winner again to undo."
+        : `Add ${MIN_ENTRIES}-${MAX_ENTRIES} entries (name, optional note and photo). Entry 1 is the top seed; if the count isn't a power of two, the top seeds get byes.`;
+    if (inLog) {
+      renderLog();
+    } else if (bracket) {
       renderBracket();
       // Wide brackets scroll sideways: start with the Final in view instead of the left edge.
       const el = document.getElementById("bracket");
@@ -630,6 +743,118 @@
     } else {
       renderSetup();
     }
+  }
+
+  // ---------- Tournament log ----------
+  // Summarize any tournament (not just the open one) by pointing `state` at it for a moment.
+  function summarize(t) {
+    const prev = state;
+    state = t;
+    try {
+      const n = t.entries.length;
+      const info = { n, status: "Setting up", champion: null };
+      if (t.started && t.builtN === n) {
+        const L = layout();
+        const champ = winner(L, L.rounds - 1, 0);
+        const played = t.picks.reduce((sum, round) => sum + round.filter(v => v !== null).length, 0);
+        if (champ !== null) {
+          info.status = "Finished";
+          info.champion = entryLabel(champ);
+        } else {
+          info.status = played === 0 ? "Bracket ready" : `${played} of ${n - 1} matches played`;
+        }
+      }
+      return info;
+    } finally {
+      state = prev;
+    }
+  }
+
+  function formatWhen(ts) {
+    try {
+      return new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    } catch (e) { return ""; }
+  }
+
+  function renderLog() {
+    const list = document.getElementById("tlist");
+    list.innerHTML = "";
+    if (!db.tournaments.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty-log";
+      empty.textContent = 'No tournaments yet. Click "New tournament" to create your first bracket.';
+      list.appendChild(empty);
+      return;
+    }
+    [...db.tournaments].sort((a, b) => b.updated - a.updated).forEach(t => {
+      const info = summarize(t);
+      const card = document.createElement("div");
+      card.className = "tcard";
+      card.dataset.id = t.id;
+      card.innerHTML = `
+        <div class="tinfo">
+          <div class="tname"></div>
+          <div class="tchamp hidden"></div>
+          <div class="tmeta"></div>
+        </div>
+        <div class="tbtns">
+          <button class="open">Open</button>
+          <button class="danger del">Delete</button>
+        </div>`;
+      // textContent (not innerHTML) so typed names can't inject markup
+      card.querySelector(".tname").textContent = displayName(t);
+      if (info.champion) {
+        const champ = card.querySelector(".tchamp");
+        champ.textContent = `Champion: ${info.champion}`;
+        champ.classList.remove("hidden");
+      }
+      card.querySelector(".tmeta").textContent =
+        `${info.n} entries · ${info.status} · Updated ${formatWhen(t.updated)}`;
+
+      card.addEventListener("click", (ev) => {
+        if (!ev.target.closest("button")) openTournament(t.id);
+      });
+      card.querySelector(".open").addEventListener("click", () => openTournament(t.id));
+      card.querySelector(".del").addEventListener("click", () => {
+        deleteTournament(t.id);
+        renderLog();
+      });
+      list.appendChild(card);
+    });
+  }
+
+  function openTournament(id) {
+    const t = db.tournaments.find(x => x.id === id);
+    if (!t) return;
+    state = t;
+    db.openId = id;
+    save(false);
+    show(t.started && t.builtN === t.entries.length ? "bracket" : "setup");
+  }
+
+  // A tournament that was created but never touched shouldn't clutter the log.
+  function isPristine(t) {
+    return !t.started && !t.nameEdited && t.entries.every(e => !e.name && !e.note && !e.photo);
+  }
+
+  function goHome() {
+    if (state && isPristine(state)) db.tournaments = db.tournaments.filter(t => t !== state);
+    state = null;
+    db.openId = null;
+    save(false);
+    show("log");
+  }
+
+  // Asks first. Returns true if it was deleted.
+  function deleteTournament(id) {
+    const t = db.tournaments.find(x => x.id === id);
+    if (!t) return false;
+    if (!confirm(`Delete "${displayName(t)}"? This can't be undone.`)) return false;
+    db.tournaments = db.tournaments.filter(x => x.id !== id);
+    if (db.openId === id) db.openId = null;
+    if (state && state.id === id) state = null;
+    save(false);
+    return true;
   }
 
   addBtn.addEventListener("click", () => {
@@ -679,17 +904,29 @@
     renderBracket();
   });
 
-  document.getElementById("reset").addEventListener("click", () => {
-    if (!confirm("Delete all entries, photos, and results?")) return;
-    state = newState();
+  document.getElementById("newTournament").addEventListener("click", () => {
+    openTournament(createTournament().id);
+  });
+
+  document.getElementById("back").addEventListener("click", goHome);
+
+  document.getElementById("deleteCurrent").addEventListener("click", () => {
+    if (state && deleteTournament(state.id)) show("log");
+  });
+
+  document.getElementById("tname").addEventListener("input", (ev) => {
+    if (!state) return;
+    state.name = ev.target.value;
+    state.nameEdited = true;
+    document.getElementById("title").textContent = displayName(state);
     save();
-    show("setup");
   });
 
   window.addEventListener("resize", drawLines);
 
   // ---------- Init ----------
-  show(state.started && state.builtN === state.entries.length ? "bracket" : "setup");
+  // Pick up where you left off if a tournament was open, otherwise show the log.
+  if (db.openId) openTournament(db.openId); else show("log");
 </script>
 </body>
 </html>
