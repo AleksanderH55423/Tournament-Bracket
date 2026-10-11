@@ -76,15 +76,33 @@
 
   /* ---------- Bracket ---------- */
   .bracket {
-    display: flex;
-    gap: 36px;
     overflow-x: auto;
     padding-bottom: 16px;
   }
+  /* Left half | Final | right half, laid out as one row of columns.
+     width: max-content + auto margins centers it when it fits and scrolls when it doesn't. */
+  .cols {
+    position: relative;
+    display: flex;
+    gap: 40px;
+    width: max-content;
+    margin: 0 auto;
+  }
+  .lines {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+  .lines path { fill: none; stroke-width: 2; stroke-linejoin: round; }
+  .lines path.pending { stroke: #4a5266; }
+  .lines path.done { stroke: var(--win); }
   .round {
     display: flex;
     flex-direction: column;
-    min-width: 250px;
+    min-width: 230px;
   }
   .round h3 {
     text-align: center;
@@ -100,6 +118,7 @@
     justify-content: space-around;
     flex: 1;
     gap: 16px;
+    padding-top: 18px; /* room for the Final's crown; applied to every column so alignment is unchanged */
   }
   .match {
     background: var(--card);
@@ -137,9 +156,39 @@
   .team .note { font-size: 12px; color: var(--muted); }
   .team .seed { color: var(--muted); font-size: 11px; }
 
+  /* ---------- The gilded Final ---------- */
+  .match.final {
+    position: relative;
+    overflow: visible; /* lets the crown sit on top of the card */
+    border: 2px solid #d9aa3c;
+    background: linear-gradient(145deg, #2e2817 0%, #1f232d 50%, #2e2817 100%);
+    box-shadow: 0 0 0 1px rgba(255, 224, 138, 0.2), 0 0 6px rgba(245, 185, 66, 0.15);
+  }
+  .match.final .team:first-of-type { border-radius: 6px 6px 0 0; }
+  .match.final .team:last-of-type { border-radius: 0 0 6px 6px; }
+  .match.final .team + .team { border-top-color: rgba(217, 170, 60, 0.45); }
+  .match.final .team:hover { background: rgba(245, 185, 66, 0.1); }
+  .match.final .team.empty:hover { background: transparent; }
+  .match.final .team.winner {
+    border-left-color: var(--accent);
+    background: rgba(245, 185, 66, 0.18);
+  }
+  .match.final .crown {
+    position: absolute;
+    left: 50%;
+    top: -27px;
+    width: 44px;
+    height: 34px;
+    transform: translateX(-50%);
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+    pointer-events: none;
+  }
+  .match.final .crown .body { fill: url(#crownGold); stroke: #8a6416; stroke-width: 1; stroke-linejoin: round; }
+  .match.final .crown .jewel { fill: #fff3c4; stroke: #8a6416; stroke-width: 0.8; }
+
   .champion {
     text-align: center;
-    margin: 0 0 20px;
+    margin: 0 auto 20px;
     padding: 16px;
     border: 2px solid var(--accent);
     border-radius: 10px;
@@ -417,28 +466,132 @@
     return el;
   }
 
+  function range(from, to) { // [from, to)
+    return Array.from({ length: to - from }, (_, i) => from + i);
+  }
+
+  function buildMatch(L, r, m) {
+    const [a, b] = participants(L, r, m);
+    const match = document.createElement("div");
+    match.className = "match";
+    match.dataset.r = r;
+    match.dataset.m = m;
+    match.appendChild(teamEl(L, r, m, a));
+    match.appendChild(teamEl(L, r, m, b));
+    return match;
+  }
+
+  // Little gold crown that perches on the Final's top edge.
+  const CROWN_SVG = `
+    <svg class="crown" viewBox="0 0 44 34" aria-hidden="true">
+      <defs>
+        <linearGradient id="crownGold" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#ffe08a"/>
+          <stop offset="0.55" stop-color="#f5b942"/>
+          <stop offset="1" stop-color="#c58a1d"/>
+        </linearGradient>
+      </defs>
+      <path class="body" d="M5 28 L2 9 L13 18 L22 4 L31 18 L42 9 L39 28 Z"/>
+      <rect class="body" x="5" y="28" width="34" height="5" rx="1.5"/>
+      <circle class="jewel" cx="2" cy="8" r="2.4"/>
+      <circle class="jewel" cx="22" cy="3.5" r="2.8"/>
+      <circle class="jewel" cx="42" cy="8" r="2.4"/>
+      <circle class="jewel" cx="22" cy="23" r="2.2"/>
+    </svg>`;
+
+  // One column of matches. side: "L" (left half), "R" (right half) or "C" (the Final).
+  function roundColumn(L, r, matchIdxs, side) {
+    const col = document.createElement("div");
+    col.className = "round";
+    col.innerHTML = `<h3></h3><div class="round-body"></div>`;
+    col.querySelector("h3").textContent = roundName(r, L);
+    const body = col.querySelector(".round-body");
+    matchIdxs.forEach(m => {
+      const match = buildMatch(L, r, m);
+      match.dataset.side = side;
+      if (side === "C") {
+        match.classList.add("final");
+        match.insertAdjacentHTML("afterbegin", CROWN_SVG);
+      }
+      body.appendChild(match);
+    });
+    return col;
+  }
+
+  // Connector lines: each match links to the match it feeds in the next round.
+  // Drawn from measured positions, so they follow whatever size the cards end up.
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  function drawLines() {
+    const cols = document.querySelector("#bracket .cols");
+    if (!cols) return;
+    const svg = cols.querySelector("svg.lines");
+    const L = layout();
+    const origin = cols.getBoundingClientRect();
+
+    const boxes = {};
+    const matchEls = [...cols.querySelectorAll(".match")];
+    matchEls.forEach(el => {
+      const b = el.getBoundingClientRect();
+      boxes[`${el.dataset.r}-${el.dataset.m}`] = {
+        left: b.left - origin.left,
+        right: b.right - origin.left,
+        mid: b.top - origin.top + b.height / 2,
+        side: el.dataset.side,
+      };
+    });
+
+    const pending = [], done = [];
+    matchEls.forEach(el => {
+      const r = +el.dataset.r, m = +el.dataset.m;
+      if (r >= L.rounds - 1) return; // the Final feeds nothing
+      const child = boxes[`${r}-${m}`];
+      const parent = boxes[`${r + 1}-${m >> 1}`];
+      if (!child || !parent) return;
+      const fromLeftSide = child.side === "L";
+      const x1 = fromLeftSide ? child.right : child.left;
+      const x2 = fromLeftSide ? parent.left : parent.right;
+      const xm = (x1 + x2) / 2;
+      const d = `M${x1} ${child.mid}H${xm}V${parent.mid}H${x2}`;
+      (winner(L, r, m) !== null ? done : pending).push(d);
+    });
+
+    svg.innerHTML = "";
+    [[pending, "pending"], [done, "done"]].forEach(([list, cls]) => {
+      list.forEach(d => {
+        const path = document.createElementNS(SVG_NS, "path");
+        path.setAttribute("d", d);
+        path.setAttribute("class", cls);
+        svg.appendChild(path);
+      });
+    });
+  }
+
   function renderBracket() {
     const L = layout();
     const bracketEl = document.getElementById("bracket");
     bracketEl.innerHTML = "";
 
-    for (let r = 0; r < L.rounds; r++) {
-      const round = document.createElement("div");
-      round.className = "round";
-      round.innerHTML = `<h3></h3><div class="round-body"></div>`;
-      round.querySelector("h3").textContent = roundName(r, L);
-      const body = round.querySelector(".round-body");
+    const cols = document.createElement("div");
+    cols.className = "cols";
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "lines");
+    cols.appendChild(svg); // first, so the cards sit on top of the lines
 
-      state.picks[r].forEach((_, m) => {
-        const [a, b] = participants(L, r, m);
-        const match = document.createElement("div");
-        match.className = "match";
-        match.appendChild(teamEl(L, r, m, a));
-        match.appendChild(teamEl(L, r, m, b));
-        body.appendChild(match);
-      });
-      bracketEl.appendChild(round);
+    const last = L.rounds - 1;
+    // Left half: first half of each round's matches, earliest round on the far left
+    for (let r = 0; r < last; r++) {
+      const half = state.picks[r].length / 2;
+      cols.appendChild(roundColumn(L, r, range(0, half), "L"));
     }
+    // Center: the Final
+    cols.appendChild(roundColumn(L, last, [0], "C"));
+    // Right half: second half of each round's matches, mirrored (earliest round on the far right)
+    for (let r = last - 1; r >= 0; r--) {
+      const half = state.picks[r].length / 2;
+      cols.appendChild(roundColumn(L, r, range(half, half * 2), "R"));
+    }
+    bracketEl.appendChild(cols);
 
     // Champion banner
     const champEl = document.getElementById("champion");
@@ -457,6 +610,8 @@
       champEl.className = "";
       champEl.innerHTML = "";
     }
+
+    drawLines();
   }
 
   // ---------- View switching ----------
@@ -467,7 +622,14 @@
     document.getElementById("sub").textContent = bracket
       ? "Click an entry to advance it. Click the winner again to undo."
       : `Add ${MIN_ENTRIES}-${MAX_ENTRIES} entries (name, optional note and photo). Entry 1 is the top seed; if the count isn't a power of two, the top seeds get byes.`;
-    if (bracket) renderBracket(); else renderSetup();
+    if (bracket) {
+      renderBracket();
+      // Wide brackets scroll sideways: start with the Final in view instead of the left edge.
+      const el = document.getElementById("bracket");
+      el.scrollLeft = Math.max(0, (el.scrollWidth - el.clientWidth) / 2);
+    } else {
+      renderSetup();
+    }
   }
 
   addBtn.addEventListener("click", () => {
@@ -493,9 +655,17 @@
   });
 
   document.getElementById("fill").addEventListener("click", () => {
-    const names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"];
+    // Full NATO alphabet (26); past that it wraps with a number: Alpha 2, Bravo 2, ...
+    const nato = [
+      "Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India",
+      "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo",
+      "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "X-ray", "Yankee", "Zulu",
+    ];
     state.entries.forEach((e, i) => {
-      if (!e.name) e.name = i < names.length ? names[i] : `Sample ${i + 1}`;
+      if (!e.name) {
+        const lap = Math.floor(i / nato.length);
+        e.name = nato[i % nato.length] + (lap ? ` ${lap + 1}` : "");
+      }
     });
     save();
     renderSetup();
@@ -515,6 +685,8 @@
     save();
     show("setup");
   });
+
+  window.addEventListener("resize", drawLines);
 
   // ---------- Init ----------
   show(state.started && state.builtN === state.entries.length ? "bracket" : "setup");
