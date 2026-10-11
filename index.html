@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>8-Entry Tournament Bracket</title>
+<title>Tournament Bracket</title>
 <style>
   :root {
     --bg: #14161c;
@@ -24,7 +24,7 @@
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   h1 { margin: 0 0 4px; }
-  .sub { color: var(--muted); margin: 0 0 20px; }
+  .sub { color: var(--muted); margin: 0 0 20px; max-width: 760px; }
   button {
     background: var(--accent);
     color: #1a1a1a;
@@ -35,13 +35,16 @@
     cursor: pointer;
   }
   button.secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
-  button:hover { filter: brightness(1.08); }
+  button:hover:not(:disabled) { filter: brightness(1.08); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
   .hidden { display: none !important; }
 
   /* ---------- Setup ---------- */
+  .count { margin: 0 0 12px; color: var(--muted); }
+  .count strong { color: var(--text); }
   .slot {
     display: grid;
-    grid-template-columns: 28px 1fr 1.4fr auto 56px;
+    grid-template-columns: 28px 1fr 1.4fr auto 56px 34px;
     gap: 10px;
     align-items: center;
     background: var(--card);
@@ -49,7 +52,7 @@
     border-radius: 8px;
     padding: 10px;
     margin-bottom: 8px;
-    max-width: 900px;
+    max-width: 940px;
   }
   .slot .num { color: var(--muted); font-weight: 700; text-align: center; }
   .slot input[type="text"] {
@@ -61,6 +64,7 @@
     border-radius: 6px;
   }
   .slot input[type="file"] { color: var(--muted); max-width: 190px; font-size: 12px; }
+  .slot .remove { padding: 6px 0; width: 34px; }
   .thumb {
     width: 48px; height: 48px;
     border-radius: 6px;
@@ -68,7 +72,7 @@
     background: var(--bg);
     border: 1px solid var(--border);
   }
-  .actions { margin-top: 16px; display: flex; gap: 10px; }
+  .actions { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
 
   /* ---------- Bracket ---------- */
   .bracket {
@@ -80,7 +84,6 @@
   .round {
     display: flex;
     flex-direction: column;
-    justify-content: space-around;
     min-width: 250px;
   }
   .round h3 {
@@ -117,8 +120,11 @@
   .team:hover { background: var(--card-hover); }
   .team.empty { cursor: default; color: var(--muted); font-style: italic; }
   .team.empty:hover { background: transparent; }
+  .team.empty.bye { opacity: 0.5; letter-spacing: 0.1em; }
   .team.winner { border-left-color: var(--win); background: rgba(62, 207, 142, 0.12); }
+  .team.winner:hover { background: rgba(62, 207, 142, 0.18); }
   .team.loser { opacity: 0.45; }
+  .team.locked { cursor: default; }
   .team img, .team .ph {
     width: 44px; height: 44px;
     border-radius: 6px;
@@ -151,8 +157,10 @@
 
   <!-- SETUP VIEW -->
   <section id="setup">
+    <p class="count" id="count"></p>
     <div id="slots"></div>
     <div class="actions">
+      <button class="secondary" id="add">+ Add entry</button>
       <button id="generate">Generate bracket</button>
       <button class="secondary" id="fill">Fill with sample names</button>
     </div>
@@ -170,19 +178,24 @@
   </section>
 
 <script>
-  const SIZE = 8;
-  const ROUND_NAMES = ["Quarterfinals", "Semifinals", "Final"];
-  const STORAGE_KEY = "bracket-poc-v1";
+  const MIN_ENTRIES = 2;
+  const MAX_ENTRIES = 32;
+  const DEFAULT_ENTRIES = 8;
+  const STORAGE_KEY = "bracket-poc-v2";
 
   // ---------- State ----------
-  // entries: 8 items { name, note, photo }
-  // picks[r][m] = index (0-7) of the entry that won match m in round r, or null
+  // entries: array of { name, note, photo } in seed order (entry 1 = top seed)
+  // picks[r][m]: index of the entry the user picked to win match m of round r, or null
+  // builtN: how many entries the current picks were built for (0 = needs rebuilding)
   let state = load() || newState();
+
+  function blankEntry() { return { name: "", note: "", photo: "" }; }
 
   function newState() {
     return {
-      entries: Array.from({ length: SIZE }, () => ({ name: "", note: "", photo: "" })),
-      picks: [[null, null, null, null], [null, null], [null]],
+      entries: Array.from({ length: DEFAULT_ENTRIES }, blankEntry),
+      picks: [],
+      builtN: 0,
       started: false,
     };
   }
@@ -190,7 +203,8 @@
   function load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : null;
+      const s = raw ? JSON.parse(raw) : null;
+      return s && Array.isArray(s.entries) && Array.isArray(s.picks) ? s : null;
     } catch (e) { return null; }
   }
 
@@ -198,41 +212,114 @@
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch (e) {
-      alert("Couldn't save (storage full?). Try smaller photos.");
+      alert("Couldn't save (storage full?). Try smaller photos or fewer entries.");
     }
   }
 
   // ---------- Bracket logic ----------
-  // Who is in match m of round r (entry indices or null)?
-  function participants(r, m) {
-    if (r === 0) return [2 * m, 2 * m + 1];
-    return [state.picks[r - 1][2 * m], state.picks[r - 1][2 * m + 1]];
+  function nextPow2(n) {
+    let p = 2;
+    while (p < n) p *= 2;
+    return p;
+  }
+
+  // Standard seeding order: [1, 8, 4, 5, 2, 7, 3, 6] for 8 so 1 meets 8, 4 meets 5, etc.
+  // The best seeds therefore get the byes when the field isn't a power of two.
+  function seedOrder(p) {
+    let order = [1];
+    while (order.length < p) {
+      const n = order.length * 2;
+      order = order.flatMap(s => [s, n + 1 - s]);
+    }
+    return order;
+  }
+
+  // Everything derived from the number of entries.
+  function layout() {
+    const n = state.entries.length;
+    const p = nextPow2(n);
+    const slots = seedOrder(p).map(seed => (seed <= n ? seed - 1 : null)); // null = bye
+    return { n, p, rounds: Math.log2(p), slots };
+  }
+
+  function buildPicks(p) {
+    const out = [];
+    for (let size = p / 2; size >= 1; size /= 2) out.push(new Array(size).fill(null));
+    return out;
+  }
+
+  // Who plays match m of round r? (entry index, or null for a bye / not decided yet)
+  function participants(L, r, m) {
+    if (r === 0) return [L.slots[2 * m], L.slots[2 * m + 1]];
+    return [winner(L, r - 1, 2 * m), winner(L, r - 1, 2 * m + 1)];
+  }
+
+  // A round-1 match against a bye is won automatically by the other entry.
+  function winner(L, r, m) {
+    if (r === 0) {
+      const [a, b] = participants(L, 0, m);
+      if (a === null) return b;
+      if (b === null) return a;
+    }
+    return state.picks[r][m];
+  }
+
+  function isByeMatch(L, m) {
+    return participants(L, 0, m).includes(null);
   }
 
   // Clear any pick that no longer matches its participants (cascades forward).
-  function sanitize() {
+  function sanitize(L) {
     for (let r = 1; r < state.picks.length; r++) {
       for (let m = 0; m < state.picks[r].length; m++) {
-        const p = participants(r, m);
-        if (!p.includes(state.picks[r][m])) state.picks[r][m] = null;
+        if (!participants(L, r, m).includes(state.picks[r][m])) state.picks[r][m] = null;
       }
     }
   }
 
   function pickWinner(r, m, entryIdx) {
-    if (entryIdx === null) return;
+    const L = layout();
+    if (entryIdx === null || (r === 0 && isByeMatch(L, m))) return;
     // clicking the current winner again undoes the pick
     state.picks[r][m] = state.picks[r][m] === entryIdx ? null : entryIdx;
-    sanitize();
+    sanitize(L);
     save();
     renderBracket();
   }
 
+  function roundName(r, L) {
+    const left = L.rounds - r;
+    if (left === 1) return "Final";
+    if (left === 2) return "Semifinals";
+    if (left === 3) return "Quarterfinals";
+    return `Round of ${L.p / 2 ** r}`;
+  }
+
   // ---------- Setup view ----------
   const slotsEl = document.getElementById("slots");
+  const addBtn = document.getElementById("add");
+
+  function entriesChanged() {
+    // Seeds shifted or the size changed, so old results no longer apply.
+    state.builtN = 0;
+    state.started = false;
+    save();
+  }
+
+  function updateCount() {
+    const n = state.entries.length;
+    const p = nextPow2(n);
+    const byes = p - n;
+    document.getElementById("count").innerHTML =
+      `<strong>${n}</strong> entries &rarr; ${p}-slot bracket` +
+      (byes ? ` (${byes} bye${byes === 1 ? "" : "s"} for the top seed${byes === 1 ? "" : "s"})` : " (no byes)");
+    addBtn.disabled = n >= MAX_ENTRIES;
+  }
 
   function renderSetup() {
     slotsEl.innerHTML = "";
+    const canRemove = state.entries.length > MIN_ENTRIES;
+
     state.entries.forEach((e, i) => {
       const row = document.createElement("div");
       row.className = "slot";
@@ -242,14 +329,17 @@
         <input type="text" placeholder="Note (optional)" maxlength="80" value="">
         <input type="file" accept="image/*">
         <img class="thumb" alt="">
+        <button class="secondary remove" title="Remove this entry">&times;</button>
       `;
       const [nameIn, noteIn] = row.querySelectorAll('input[type="text"]');
       const fileIn = row.querySelector('input[type="file"]');
       const thumb = row.querySelector(".thumb");
+      const removeBtn = row.querySelector(".remove");
 
       nameIn.value = e.name;
       noteIn.value = e.note;
       if (e.photo) thumb.src = e.photo; else thumb.style.visibility = "hidden";
+      removeBtn.disabled = !canRemove;
 
       nameIn.addEventListener("input", () => { e.name = nameIn.value; save(); });
       noteIn.addEventListener("input", () => { e.note = noteIn.value; save(); });
@@ -261,11 +351,18 @@
         thumb.style.visibility = "visible";
         save();
       });
+      removeBtn.addEventListener("click", () => {
+        if (state.entries.length <= MIN_ENTRIES) return;
+        state.entries.splice(i, 1);
+        entriesChanged();
+        renderSetup();
+      });
       slotsEl.appendChild(row);
     });
+    updateCount();
   }
 
-  // Resize to a small square-ish JPEG so localStorage doesn't overflow.
+  // Resize to a small JPEG so localStorage doesn't overflow.
   function shrinkImage(file, max) {
     return new Promise((resolve) => {
       const reader = new FileReader();
@@ -290,16 +387,19 @@
     return state.entries[i].name.trim() || `Entry ${i + 1}`;
   }
 
-  function teamEl(r, m, idx, otherIdx) {
+  function teamEl(L, r, m, idx) {
     const el = document.createElement("div");
-    if (idx === null || idx === undefined) {
-      el.className = "team empty";
-      el.textContent = "TBD";
+    if (idx === null) {
+      el.className = "team empty" + (r === 0 ? " bye" : "");
+      el.textContent = r === 0 ? "BYE" : "TBD";
       return el;
     }
     const e = state.entries[idx];
-    const picked = state.picks[r][m];
-    el.className = "team" + (picked === idx ? " winner" : picked !== null ? " loser" : "");
+    const picked = winner(L, r, m);
+    const locked = r === 0 && isByeMatch(L, m);
+    el.className = "team" +
+      (picked === idx ? " winner" : picked !== null ? " loser" : "") +
+      (locked ? " locked" : "");
     const photo = e.photo
       ? `<img src="${e.photo}" alt="">`
       : `<div class="ph"></div>`;
@@ -313,34 +413,36 @@
     // textContent (not innerHTML) so typed text can't inject markup
     el.querySelector(".name").textContent = entryLabel(idx);
     el.querySelector(".note").textContent = e.note;
-    el.addEventListener("click", () => pickWinner(r, m, idx));
+    if (!locked) el.addEventListener("click", () => pickWinner(r, m, idx));
     return el;
   }
 
   function renderBracket() {
+    const L = layout();
     const bracketEl = document.getElementById("bracket");
     bracketEl.innerHTML = "";
 
-    ROUND_NAMES.forEach((name, r) => {
+    for (let r = 0; r < L.rounds; r++) {
       const round = document.createElement("div");
       round.className = "round";
-      round.innerHTML = `<h3>${name}</h3><div class="round-body"></div>`;
+      round.innerHTML = `<h3></h3><div class="round-body"></div>`;
+      round.querySelector("h3").textContent = roundName(r, L);
       const body = round.querySelector(".round-body");
 
       state.picks[r].forEach((_, m) => {
-        const [a, b] = participants(r, m);
+        const [a, b] = participants(L, r, m);
         const match = document.createElement("div");
         match.className = "match";
-        match.appendChild(teamEl(r, m, a, b));
-        match.appendChild(teamEl(r, m, b, a));
+        match.appendChild(teamEl(L, r, m, a));
+        match.appendChild(teamEl(L, r, m, b));
         body.appendChild(match);
       });
       bracketEl.appendChild(round);
-    });
+    }
 
     // Champion banner
     const champEl = document.getElementById("champion");
-    const champ = state.picks[2][0];
+    const champ = winner(L, L.rounds - 1, 0);
     if (champ !== null) {
       const e = state.entries[champ];
       champEl.className = "champion";
@@ -364,13 +466,27 @@
     document.getElementById("bracketView").classList.toggle("hidden", !bracket);
     document.getElementById("sub").textContent = bracket
       ? "Click an entry to advance it. Click the winner again to undo."
-      : "Add 8 entries (name, optional note and photo), then generate the bracket.";
+      : `Add ${MIN_ENTRIES}-${MAX_ENTRIES} entries (name, optional note and photo). Entry 1 is the top seed; if the count isn't a power of two, the top seeds get byes.`;
     if (bracket) renderBracket(); else renderSetup();
   }
 
+  addBtn.addEventListener("click", () => {
+    if (state.entries.length >= MAX_ENTRIES) return;
+    state.entries.push(blankEntry());
+    entriesChanged();
+    renderSetup();
+    const inputs = slotsEl.querySelectorAll('.slot input[type="text"]');
+    if (inputs.length >= 2) inputs[inputs.length - 2].focus(); // new row's name field
+  });
+
   document.getElementById("generate").addEventListener("click", () => {
+    const n = state.entries.length;
     const filled = state.entries.filter(e => e.name.trim()).length;
-    if (filled < SIZE && !confirm(`Only ${filled} of ${SIZE} entries have names. Continue anyway?`)) return;
+    if (filled < n && !confirm(`Only ${filled} of ${n} entries have names. Continue anyway?`)) return;
+    if (state.builtN !== n) {
+      state.picks = buildPicks(nextPow2(n));
+      state.builtN = n;
+    }
     state.started = true;
     save();
     show("bracket");
@@ -378,7 +494,9 @@
 
   document.getElementById("fill").addEventListener("click", () => {
     const names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel"];
-    state.entries.forEach((e, i) => { if (!e.name) e.name = names[i]; });
+    state.entries.forEach((e, i) => {
+      if (!e.name) e.name = i < names.length ? names[i] : `Sample ${i + 1}`;
+    });
     save();
     renderSetup();
   });
@@ -386,7 +504,7 @@
   document.getElementById("edit").addEventListener("click", () => show("setup"));
 
   document.getElementById("clearPicks").addEventListener("click", () => {
-    state.picks = [[null, null, null, null], [null, null], [null]];
+    state.picks = buildPicks(layout().p);
     save();
     renderBracket();
   });
@@ -399,7 +517,7 @@
   });
 
   // ---------- Init ----------
-  show(state.started ? "bracket" : "setup");
+  show(state.started && state.builtN === state.entries.length ? "bracket" : "setup");
 </script>
 </body>
 </html>
